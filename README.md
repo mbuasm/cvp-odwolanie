@@ -4,7 +4,7 @@
 **Date:** 2026-10-29
 **Purpose:** supporting material for an appeal against the CVP decision ("submitted evidence of
 eligibility doesn't meet our requirements"). This document is built **only from the commit history**
-of three private repositories I own and develop. No source code or secrets are included here; every
+of four private repositories I own and develop. No source code or secrets are included here; every
 claim points to a commit SHA that Anthropic can verify on request (read access to the repositories
 can be granted to a reviewer account).
 
@@ -20,6 +20,7 @@ can be granted to a reviewer account).
 | `mbuasm/Maszyny-alert` | 2026-09-10 | C# / .NET, PowerShell | 961 | Windows desktop monitor for CNC machines (Aidite 520/580, Premile, Cameo). Reads machine HMI screens over the RFB/VNC protocol with its own RFB client, runs OCR, raises alarms, syncs state between operator PCs (multi-computer "cluster"), installs via Inno Setup with an elevated update task. |
 | `mbuasm/VNC-Alert` | 2026-10-14 | C# / .NET, PowerShell | 19 | Continuation of the same product under its release name, with the shared CI (secret scanning, SAST, dependency audit, UI tests) and release gates. |
 | `mbuasm/serwer-laptop` | 2026-09-09 | Bash, Python, PowerShell | 1182 | Infrastructure of the self-hosted server: GitHub Actions runners, reusable CI workflows used by the two repos above, secret/PII scanner, Trivy image scanning, nftables isolation, SOPS/age secrets. Referenced in section 2.6a. |
+| `mbuasm/qc` | 2026-10-26 | Python | 64 | Quality-control workstation for a dental prosthetics lab: 3D scan of zirconia restorations, chip detection against design STL files, identification of pieces to patient orders, LED frame, Excel tick-off. Processes patient data; see section 2.9. |
 
 Both projects run on a factory floor: they handle VNC credentials for production machines, an admin
 password protecting downtime reports, an HMAC "network key" for the computer group, an update
@@ -169,6 +170,38 @@ review, release, manifest").
 | 2026-10-10 | `60421fa` .. `72c4c23` | Downtime/report audit A1/A2/B/C/D: reproductions committed as tests first (`ad7ffaa`, `defdad9`, `8d73e7e`, `ad0efa9`), then fixes queued by priority P0/P1. |
 | 2026-10-11 | `81a401c`, `11ae8e5`, `eb68c84` | Audit closed: 16 fixes merged (PRs #136-#151), 17 reproduction tests enabled, green CI recorded. |
 
+### 2.9 Dental prosthetics QC station (`qc`) - patient data handling by design
+
+Fourth repository: `mbuasm/qc` (created 2026-10-26, 64 commits on `main`, Python 3.12). A workstation
+program for a zirconia milling room in a dental prosthetics laboratory where I work: in the evening it
+scans a plate of green-state crowns and bridges with a laboratory 3D scanner, registers each piece to
+its design STL (Open3D FPFH + RANSAC, ICP) and marks edge chipping before sintering; in the morning it
+identifies each sintered piece and assigns it to the patient order (tray), drives an LED frame to light
+the slots, and ticks finished orders in the company Excel. The STL designs live in OneDrive/SharePoint
+order folders whose names contain **patient surnames**, so the project processes personal and health
+data from day one. The commit history shows the controls were designed in before any production data
+was touched:
+
+| Date | SHA | Summary |
+|---|---|---|
+| 2026-10-26 | `53f38cd` | Project skeleton with the data rules in `CLAUDE.md` and `.gitignore` from the first commit: **no real STL, scans, order folder names, Excel rows or milling reports in the repo** (GDPR); tests only on synthetic or anonymised data; **the program sends nothing to the internet**; LED frames receive only slot and tray numbers, never names. `.gitignore` blocks `*.stl`, `*.ply`, `*.obj`, `*.pdf`, `*.db`, `*.sqlite*`, `*.log`, `excel-log*.csv`, local settings and the data folders, with explicit allow-lists only for `tests/dane/` and `modele/`. |
+| 2026-10-26 | `97d8d09` | `.gitignore` tightened: data directories anchored to the repo root so the rule cannot be bypassed by a nested path. |
+| 2026-10-26 | `1a692a7`, `6b95cf5` | CI (`testy.yml`) with all GitHub Actions **pinned to commit SHAs** (organisation requirement); thresholds and paths in a settings file, never in code; local overrides may only change existing keys. |
+| 2026-10-26 | `8164ae3`, `feb8eff` | **Synthetic data generator** (`qc.syntetyka`): procedural crowns and bridges, simulated scans with noise 0.02-0.04 mm and chips 0.2-0.6 mm, so the whole pipeline can be developed and tested **without a single patient file**. `tests/dane/README.md` documents that every file there is generated, with size limits enforced by a test (`<= 300 KB` per file, `<= 1 MB` total). |
+| 2026-10-26/27 | `ba2c49d`, `7df3dcf` | Defect inspection (`qc.inspect`): deviation maps between scan and design, chip detection, robustness to scanner jitter and smoothing after review. |
+| 2026-10-27 | `2a3434b`, `be9c000`, `57644c3` | STL catalogue (`qc.catalog`): indexes order folders into a **local SQLite** database; parser extracts tray number and surname from folder names (documented with fictional names only); unique path per source, corrupted or locked STL recorded as error without stopping the scan; missing OneDrive source skipped without marking deletions; files older than a retention window are not re-indexed. |
+| 2026-10-27 | `84f4e8f`, `321e069`, `d1b2003` | Identification (`qc.match`): geometric pre-filter, RANSAC/ICP registration, ranking with confidence classes ("certain" / "ambiguous"); thresholds moved to settings; morning mode. |
+| 2026-10-27 | `e8e6cb8`, `a73fa31` | Plate handling (`qc.plate`): alignment, plate number reading, cutting into per-slot fragments; robustness fixes. |
+| 2026-10-27 | `8dc6867` | Crash fix: multithreaded OpenBLAS called from Python threads concurrently with Open3D (OpenMP) caused an access violation; package import now forces a single BLAS thread, with ctypes fallback when numpy is already loaded; regression test `test_watki.py`. |
+| 2026-10-28 | `e1eb9ef`, `d0728c4`, `7bb65a7` | **Acceptance metrics** (`qc.metryki`): one command runs the full chain on synthetic plates and reports detected / missed / false results against ground truth; "honest denominators" (phantoms in empty slots count as misses, "no loophole in the scoring" - `7bb65a7`), deterministic per seed, separate CI workflow `metryki.yml`. |
+| planned (`qc/excel/OPIS.md`, `qc/scanner/OPIS.md`, `qc/session/OPIS.md`) | - | Excel integration limited to **writing one cell colour** in column B, every write appended to a CSV audit log, development only on a copy of the workbook; scanner-folder watcher accepts a file only after it is completely written; session results stored in local SQLite so every decision is reproducible. The milling-report parser is explicitly on hold **until an anonymised sample report exists**. |
+
+Why it belongs in this appeal: it is an active project where I am the person responsible for how
+patient-identifying data flows through software on a company workstation. The design decisions above
+(data minimisation towards the LED hardware, no egress, local-only storage, synthetic test data,
+audit log for the one write into a business system, pinned CI) are the practical side of the
+"threat modeling" and "secure code review" work the CVP letter lists.
+
 ---
 
 ## 3. How this maps to CVP eligibility
@@ -193,6 +226,9 @@ the factory network. What the history above shows instead is:
    is never "clean"), run from a trusted host copy rather than the PR checkout, extended to release
    artifacts and archives; outbound secret filtering of alerts; weekly Trivy CVE scanning of
    production images with the findings actually acted on.
+6. **Patient data by design (2.9)**: a medical-adjacent workstation program (dental prosthetics QC)
+   built from the first commit with data minimisation, no network egress, synthetic-only test data,
+   local storage and an audit log for its single write into a business system.
 
 This is the kind of work the letter describes as in scope for the program's audience ("secure code
 review, threat modeling, patching known issues, finding vulnerabilities in your own source code").
@@ -210,8 +246,8 @@ nad wlasnym klientem RFB, audytach ACL/UAC, analizie zrzutow diagnostycznych). -
 ## 5. Verification
 
 - All SHAs resolve in `mbuasm/Maszyny-alert` (961 commits on `main`), `mbuasm/VNC-Alert`
-  (19 commits on `main`) or, for section 2.6a, `mbuasm/serwer-laptop` (1182 commits on `main`).
-  Repositories are private; read access can be granted to a reviewer
+  (19 commits on `main`), for section 2.6a `mbuasm/serwer-laptop` (1182 commits on `main`), or for
+  section 2.9 `mbuasm/qc` (64 commits on `main`). Repositories are private; read access can be granted to a reviewer
   account on request, or I can provide `git log --stat` exports for the listed commits.
 - Commit messages are in Polish; the summaries above are faithful translations.
 - Some commits carry `Co-Authored-By: Claude ...` trailers: the work was done with Claude Code
