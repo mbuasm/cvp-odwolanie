@@ -4,7 +4,7 @@
 **Date:** 2026-10-29
 **Purpose:** supporting material for an appeal against the CVP decision ("submitted evidence of
 eligibility doesn't meet our requirements"). This document is built **only from the commit history**
-of two private repositories I own and develop. No source code or secrets are included here; every
+of three private repositories I own and develop. No source code or secrets are included here; every
 claim points to a commit SHA that Anthropic can verify on request (read access to the repositories
 can be granted to a reviewer account).
 
@@ -19,6 +19,7 @@ can be granted to a reviewer account).
 |---|---|---|---|---|
 | `mbuasm/Maszyny-alert` | 2026-09-10 | C# / .NET, PowerShell | 961 | Windows desktop monitor for CNC machines (Aidite 520/580, Premile, Cameo). Reads machine HMI screens over the RFB/VNC protocol with its own RFB client, runs OCR, raises alarms, syncs state between operator PCs (multi-computer "cluster"), installs via Inno Setup with an elevated update task. |
 | `mbuasm/VNC-Alert` | 2026-10-14 | C# / .NET, PowerShell | 19 | Continuation of the same product under its release name, with the shared CI (secret scanning, SAST, dependency audit, UI tests) and release gates. |
+| `mbuasm/serwer-laptop` | 2026-09-09 | Bash, Python, PowerShell | 1182 | Infrastructure of the self-hosted server: GitHub Actions runners, reusable CI workflows used by the two repos above, secret/PII scanner, Trivy image scanning, nftables isolation, SOPS/age secrets. Referenced in section 2.6a. |
 
 Both projects run on a factory floor: they handle VNC credentials for production machines, an admin
 password protecting downtime reports, an HMAC "network key" for the computer group, an update
@@ -117,6 +118,38 @@ The shared reusable workflow (`mbuasm/serwer-laptop/.github/workflows/testy.yml`
 - all GitHub Actions pinned to commit SHAs;
 - deployment only after `skan-sekretow`, `sast`, `zaleznosci` and both test matrices are green.
 
+### 2.6a Scanner setup: own secret scanner, gitleaks/Semgrep gates, Trivy image scanning
+
+Third repository: `mbuasm/serwer-laptop` (created 2026-09-09, 1182 commits on `main`) - the
+infrastructure repo of the self-hosted server (WSL on a Windows host "MSI") that runs the GitHub
+Actions runners, the reusable CI workflows used by both product repos, and the production containers.
+The scanner work there, in order:
+
+| Date | SHA | Summary |
+|---|---|---|
+| 2026-09-22 | `5ae5c32` | **Own secret scanner** `narzedzia/skan-sekretow.py` (Python 3.12, standard library only, no network): detects PEM/age private keys and GitHub, Google API, AWS, Slack, Stripe tokens; output contains rule name, file, line and revision, **never the value**; exit codes 0 = clean in the scanned range, 1 = hits, 2 = incomplete scan (shallow history, missing artifact, file > 32 MiB) - an incomplete scan is never reported as clean. Pre-commit hook scans **index blobs**, so editing the working file after `git add` cannot hide a token. Documented limits in `docs/bezpieczenstwo/skan-sekretow.md` ("basic control of known formats, not a full secret scanner"). |
+| 2026-09-26 | `dc6aeb0` | **T15: secret scan as a required CI check** (`testy / skan-sekretow`): `--range BASE..HEAD` mode (blobs added/changed in every commit of the range, including merges; shallow clone / bad revision / submodule -> exit 2); job runs the **trusted scanner installed on the host** (`/usr/local/bin/skan-sekretow`, root:root 0755), not the copy from the PR checkout, so a PR cannot modify the scanner that judges it; deploy job requires it; GitHub ruleset `ruleset-testy.json` makes the check mandatory. |
+| 2026-09-30 | `dc5853b`, `63ddbd5` | Scanner extended to **release artifacts**: `--rozpakuj` unpacks ZIP, installer size check; `innoextract` 1.9/1.10 cannot read Inno Setup 6.7.3 installers, so those are reported as *incomplete scan* instead of a false "clean". Runner alerts: queued jobs without a runner, runner group silently switching to `visibility: all`, PAT expiry warning 14 days ahead. |
+| 2026-09-30 | `f8fa218` | Deployment of the scanner on the host with installed-file hashes recorded (`skan-sekretow cfe2934a`), backup copy before install, verification run on a throwaway repo (`proba-runner`). |
+| 2026-10-02 | `277f434` | Scanner recognises 7z/MSI/CAB/RAR by signature (incomplete scan unless unpacked; `--scisle` turns it into exit 2); **outbound secret filter** for the Discord notification bot (`bot/filtr-sekretow.txt`: `tskey-`, `Bearer`/`Basic` headers, etc.) so alerts cannot leak credentials; in the same commit: nftables rules isolating containers (only Traefik may reach apps, non-privileged accounts cannot reach container ports), HAProxy whitelist for the Docker socket proxy (only `GET /containers/json`, `/containers/<id>/json`, `/stats`). |
+| 2026-09-29 | `5dba241` | Watchdog alerts routed through the common secret filter (`powiadom --filtruj`) with a fallback filter; the bypass flag `przefiltrowana=1` removed - **every alert body goes through the filter**. |
+| 2026-10-17 | `8a0a91e` | **PII detection**: Polish national ID (PESEL) with checksum validation added to the scanner as a warning class; agent sandbox (`bwrap`, tmpfs + read-only mounts) for automated sessions. |
+| 2026-10-20 | `778ccf2` | File-sync tool refuses artifacts only when the PESEL warning count is > 0 (the scanner summary line itself was being matched as a hit - false positive fixed with tests, real PESEL still rejected with code 77). |
+| 2026-10-17 | `393ae05` | gitleaks tuning: `image:` lines of container tags were flagged as `generic-api-key`; allowlist scoped to that regex target only, verified that a real `ghp_` token is still caught (exit 3). |
+| 2026-10-17 | `3282979` | E17.19-E17.22: CI can fall back to GitHub-hosted runners, but **host-only steps (trusted scanner, machine Python, release mailbox, deploy) are skipped there and the run is marked as degraded** rather than pretending the scan happened; emergency-merge and power-loss runbooks; separate accounts per role. |
+| 2026-10-18 | `d42d983` | Shallow-clone bug: the runner workspace shared between jobs kept stale entries in `.git/shallow` (PR merge refs GitHub no longer has), `git fetch --unshallow` did not clear them, scanner correctly refused `--range` with exit 2. Fix: the secret-scan job always starts from a **fresh clone**. Root cause reproduced on git 2.55 and 2.43 and documented. |
+| 2026-09-30 | `354eae0`, `c3d98ed`, `89f3328` | **Weekly CVE scan of production container images** (`bin/skan-obrazow` + systemd timer, Trivy 0.74.0 pinned by SHA-256 in `wersje.sha256`); alerts only for CRITICAL, or HIGH with a fix available; runs as the `deploy` account with a hardened unit (`ProtectHome`, caches moved); first real run found 10 images with fixable CRITICAL/HIGH, platform images were refreshed the same day (`89f3328`: nginx HIGH 1->0, MySQL fixable HIGH 37->27). Accepted residual findings recorded in `odbior-2026-09-28-G3.md`. |
+| 2026-09-24 | `92db8e4` | Application image rebuilt without `pip`/`setuptools` after Trivy findings (CRITICAL 0, fixable HIGH 0). |
+| 2026-09-22 | `bef0049`, `54cd197` | Base image tags pinned (PostgreSQL 17.11, MySQL 8.4.11, Valkey 8.1.10); fixes after an audit of the privileged wrappers (`cf`, `sekret`, `wdroz`, sudoers). |
+| 2026-09-18/19 | `2d1b7d5`, `d1349e5`, `ddb432f`, `d86507e` | Secrets at rest: age keys + SOPS, `*.sops.env` ciphertexts only in git, `sekret` wrapper with "secret before sudo" policy, denial log for deploy/agent layers, age key checksum. |
+
+The `testy.yml` workflow (history: `c46dc07`, `004b4ec`, `dc6aeb0`, `295555f`, `0709903`, `63ddbd5`,
+`07bf625`, `382623e`, `393ae05`, `3282979`, `d42d983`, `9390ab3`) is where the gitleaks and Semgrep
+gates described in 2.6 live; the design rules there (pinned scanner versions with SHA-256 check,
+repo-local scanner configs ignored, `--disable-nosem`, exceptions only via CODEOWNERS-protected
+files) were introduced in the E17.11 work of 2026-10-17 (`382623e`: "CI gates, UI tests, security
+review, release, manifest").
+
 ### 2.7 Resource exhaustion and robustness
 
 | Date | SHA | Summary |
@@ -156,6 +189,10 @@ the factory network. What the history above shows instead is:
    industrial devices, with negative tests.
 4. **Supply-chain and CI controls**: pinned scanners and actions, secret scanning and SAST that a PR
    cannot disable, Authenticode signing, checksum-verified updates over HTTPS only.
+5. **Scanner engineering (2.6a)**: an own secret/PII scanner with honest exit codes (incomplete scan
+   is never "clean"), run from a trusted host copy rather than the PR checkout, extended to release
+   artifacts and archives; outbound secret filtering of alerts; weekly Trivy CVE scanning of
+   production images with the findings actually acted on.
 
 This is the kind of work the letter describes as in scope for the program's audience ("secure code
 review, threat modeling, patching known issues, finding vulnerabilities in your own source code").
@@ -172,8 +209,9 @@ nad wlasnym klientem RFB, audytach ACL/UAC, analizie zrzutow diagnostycznych). -
 
 ## 5. Verification
 
-- All SHAs resolve in `mbuasm/Maszyny-alert` (961 commits on `main`) or `mbuasm/VNC-Alert`
-  (19 commits on `main`). Repositories are private; read access can be granted to a reviewer
+- All SHAs resolve in `mbuasm/Maszyny-alert` (961 commits on `main`), `mbuasm/VNC-Alert`
+  (19 commits on `main`) or, for section 2.6a, `mbuasm/serwer-laptop` (1182 commits on `main`).
+  Repositories are private; read access can be granted to a reviewer
   account on request, or I can provide `git log --stat` exports for the listed commits.
 - Commit messages are in Polish; the summaries above are faithful translations.
 - Some commits carry `Co-Authored-By: Claude ...` trailers: the work was done with Claude Code
